@@ -2,20 +2,64 @@ package games
 
 import (
 	"GoGame/des"
-	"bufio"
 	"fmt"
 	"math/rand"
 	"os"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 )
 
 type point struct{ r, c int }
 
-// PythonGame is a simple turn-based terminal Snake clone
+// Terminal control structures for raw input
+type termios struct {
+	Iflag  uint64
+	Oflag  uint64
+	Cflag  uint64
+	Lflag  uint64
+	Cc     [20]uint8
+	Ispeed uint64
+	Ospeed uint64
+}
+
+// enableRawMode puts terminal in raw mode
+func enableRawMode() *termios {
+	var original termios
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), syscall.TIOCGETA, uintptr(unsafe.Pointer(&original)))
+
+	raw := original
+	raw.Lflag &^= syscall.ECHO | syscall.ICANON
+	raw.Cc[syscall.VMIN] = 1
+	raw.Cc[syscall.VTIME] = 0
+
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), syscall.TIOCSETA, uintptr(unsafe.Pointer(&raw)))
+	return &original
+}
+
+// disableRawMode restores original terminal mode
+func disableRawMode(original *termios) {
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), syscall.TIOCSETA, uintptr(unsafe.Pointer(original)))
+}
+
+// readChar reads a single character without Enter
+func readChar() (rune, error) {
+	var buf [1]byte
+	n, err := os.Stdin.Read(buf[:])
+	if err != nil || n == 0 {
+		return 0, err
+	}
+	return rune(buf[0]), nil
+}
+
 func PythonGame() {
 	des.ClearScreen()
 	fmt.Println("=== Python (Snake) ===")
+
+	// Enable raw mode for single-key input
+	original := enableRawMode()
+	defer disableRawMode(original)
 
 	rows, cols := 12, 20
 	// initial snake of length 3 in center
@@ -26,8 +70,6 @@ func PythonGame() {
 	food := spawnFood(rows, cols, snake)
 	score := 0
 
-	in := bufio.NewReader(os.Stdin)
-
 	for {
 		des.ClearScreen()
 		fmt.Println("=== Python (Snake) ===")
@@ -36,27 +78,24 @@ func PythonGame() {
 		fmt.Print("Move [W/A/S/D], Q to quit (auto-move after 1 sec): ")
 
 		// Create a channel to receive input
-		inputChan := make(chan string, 1)
+		inputChan := make(chan rune, 1)
 
-		// Start a goroutine to read input
+		// Start a goroutine to read single character input
 		go func() {
-			line, _ := in.ReadString('\n')
-			inputChan <- strings.TrimSpace(line)
+			ch, err := readChar()
+			if err == nil {
+				inputChan <- ch
+			}
 		}()
 
 		// Wait for input or timeout after 1 second
-		var line string
+		var inputReceived bool
 		select {
-		case line = <-inputChan:
+		case ch := <-inputChan:
 			// Input received
-		case <-time.After(1 * time.Second):
-			// Timeout - continue with current direction
-			line = ""
-		}
-
-		if line != "" {
-			ch := strings.ToLower(string(line[0]))
-			switch ch {
+			inputReceived = true
+			key := strings.ToLower(string(ch))
+			switch key {
 			case "w":
 				if dir.r != 1 { // prevent instant reverse
 					dir = point{-1, 0}
@@ -76,7 +115,12 @@ func PythonGame() {
 			case "q":
 				return
 			}
+		case <-time.After(1 * time.Second):
+			// Timeout - continue with current direction
+			inputReceived = false
 		}
+
+		_ = inputReceived // Mark as used
 
 		// compute next head
 		head := snake[len(snake)-1]
